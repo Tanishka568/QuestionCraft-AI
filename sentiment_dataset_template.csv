@@ -1,0 +1,4 @@
+text,label
+"The generated questions were clear and relevant.",positive
+"The answer key contains several mistakes.",negative
+"The paper contains ten questions.",neutral
