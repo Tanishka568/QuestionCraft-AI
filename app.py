@@ -65,6 +65,17 @@ def ollama_status():
     except requests.RequestException:
         return False, []
 
+def get_openrouter_api_key():
+    """Read the OpenRouter key from environment variables or Streamlit secrets."""
+    api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+    if not api_key:
+        try:
+            api_key = str(st.secrets.get("OPENROUTER_API_KEY", "")).strip()
+        except Exception:
+            api_key = ""
+    return api_key
+
+
 def call_ollama(prompt, model):
     response = requests.post(
         f"{OLLAMA_URL}/api/generate",
@@ -78,10 +89,40 @@ def call_ollama(prompt, model):
         timeout=600,
     )
     response.raise_for_status()
-    payload = response.json()
-    content = payload.get("response", "")
+    content = response.json().get("response", "")
     if not content:
         raise ValueError("Ollama returned an empty response.")
+    return json.loads(content)
+
+
+def call_openrouter(prompt):
+    api_key = get_openrouter_api_key()
+    if not api_key:
+        raise ValueError("OpenRouter API key is missing. Add OPENROUTER_API_KEY to Streamlit secrets.")
+
+    response = requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "X-Title": "QuestionCraft AI",
+        },
+        json={
+            "model": "openrouter/free",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3,
+            "response_format": {"type": "json_object"},
+        },
+        timeout=180,
+    )
+    response.raise_for_status()
+    data = response.json()
+    choices = data.get("choices", [])
+    if not choices:
+        raise ValueError(f"OpenRouter returned no choices: {data}")
+    content = choices[0].get("message", {}).get("content", "")
+    if not content:
+        raise ValueError("OpenRouter returned an empty response.")
     return json.loads(content)
 
 def bloom_guidance(level):
@@ -144,17 +185,26 @@ def make_pdf(title, subject, difficulty, question_type, bloom_level, questions, 
     buffer.seek(0)
     return buffer.getvalue()
 
-# Sidebar model status
+# AI provider status
+openrouter_api_key = get_openrouter_api_key()
+ollama_ready, available_models = ollama_status()
 with st.sidebar:
-    st.header("Local AI status")
+    st.header("AI provider status")
+    if openrouter_api_key:
+        st.success("OpenRouter API key detected")
+        st.caption("Question generation will use OpenRouter free models.")
+    else:
+        st.warning("OpenRouter API key not found")
+        st.caption("Add OPENROUTER_API_KEY in Streamlit secrets to use OpenRouter.")
+    st.divider()
+    st.caption("Optional local fallback")
     model_name = st.text_input("Ollama model", value=DEFAULT_MODEL)
-    ollama_ready, available_models = ollama_status()
     if ollama_ready:
         st.success("Ollama is running")
         if available_models:
             st.caption("Installed models: " + ", ".join(m.get("name", "") for m in available_models))
     else:
-        st.warning("Ollama is not responding. Start Ollama Desktop or run `ollama serve`.")
+        st.caption("Ollama is not running. It is only needed if you want local fallback.")
 
 # Input
 st.markdown('<div class="section-title">01 · Add your study material</div>', unsafe_allow_html=True)
@@ -193,7 +243,7 @@ if cleaned_material:
         info, info_error = extract_information(cleaned_material)
     st.caption(f"Study material ready · {len(cleaned_material.split())} words · {len(analysis['sentences'])} sentences")
     with st.expander("View NLP analysis · CO1–CO3", expanded=False):
-        st.caption("These results are produced by NLTK, Scikit-learn and spaCy. Ollama is used separately for question generation.")
+        st.caption("These results are produced by NLTK, Scikit-learn and spaCy. OpenRouter (or optional Ollama fallback) is used for question generation.")
         tab_pre, tab_info, tab_topics = st.tabs(["Preprocessing & TF-IDF", "Information extraction", "Topic modelling"])
         with tab_pre:
             c1, c2, c3 = st.columns(3)
@@ -266,8 +316,8 @@ if generate_clicked:
         st.warning("Please enter a subject name.")
     elif num_questions == 0:
         st.warning("Select at least one question in the distribution.")
-    elif not ollama_ready:
-        st.error("Ollama is not running. Start Ollama and try again.")
+    elif not openrouter_api_key and not ollama_ready:
+        st.error("No AI provider is available. Add OPENROUTER_API_KEY to Streamlit secrets, or start Ollama for local fallback.")
     else:
         history = load_history()
         previous = [q.get("question", "") for p in history for q in p.get("questions", []) if isinstance(q, dict)]
@@ -320,8 +370,11 @@ STUDY MATERIAL:
 """
 
         try:
-            with st.spinner("Generating questions with your local LLM. This may take a few minutes..."):
-                result = call_ollama(prompt, model_name.strip())
+            with st.spinner("Generating your question paper. This may take a little time..."):
+                if openrouter_api_key:
+                    result = call_openrouter(prompt)
+                else:
+                    result = call_ollama(prompt, model_name.strip())
             questions = result.get("questions", [])
             expected_total = num_questions
             if not isinstance(questions, list) or len(questions) != expected_total:
@@ -358,12 +411,19 @@ STUDY MATERIAL:
                     save_history(history)
                     st.session_state["current_paper"] = paper
                     st.success(f"Generated a mixed question paper with {len(valid)} questions successfully.")
+        except requests.HTTPError as exc:
+            details = ""
+            try:
+                details = exc.response.text[:1000]
+            except Exception:
+                pass
+            st.error(f"AI provider request failed: {exc}. {details}")
         except requests.ConnectionError:
-            st.error("Cannot connect to Ollama. Check that Ollama is running on this computer.")
+            st.error("Could not connect to the selected AI provider. Check your internet connection or local Ollama service.")
         except requests.Timeout:
-            st.error("The local model took too long to respond. Try fewer questions or a smaller model.")
+            st.error("The AI provider took too long to respond. Try fewer questions and run generation again.")
         except json.JSONDecodeError:
-            st.error("The model did not return valid JSON. Try again or use a different Ollama model.")
+            st.error("The AI provider did not return valid JSON. Please try again.")
         except Exception as exc:
             st.error(f"Question generation failed: {exc}")
 
@@ -459,6 +519,6 @@ with st.container(border=True):
 
 st.markdown("""
 <div style="text-align:center; padding:24px 0 4px 0; color:#8A8FA3; font-size:12px;">
-  QuestionCraft AI · Built with Streamlit, NLP libraries and Ollama
+  QuestionCraft AI · Built with Streamlit, NLP libraries and OpenRouter
 </div>
 """, unsafe_allow_html=True)
