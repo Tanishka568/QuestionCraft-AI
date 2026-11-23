@@ -135,6 +135,26 @@ def bloom_guidance(level):
         "Create": "Design, formulate, construct, develop an original solution.",
     }
     return guidance.get(level, "")
+def pdf_safe(text):
+    text = str(text)
+
+    replacements = {
+        "\u2010": "-",
+        "\u2011": "-",
+        "\u2012": "-",
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2212": "-",
+        "\u2192": "->",
+        "\u2190": "<-",
+        "\u00a0": " ",
+        "\u2022": "-",
+    }
+
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+
+    return text.encode("cp1252", errors="replace").decode("cp1252")
 
 def make_pdf(title, subject, difficulty, question_type, bloom_level, questions, include_answers=False):
     buffer = BytesIO()
@@ -174,10 +194,10 @@ def make_pdf(title, subject, difficulty, question_type, bloom_level, questions, 
         if kind != current_kind:
             story.append(Paragraph(escape(section_names.get(kind, kind.upper())), section_style))
             current_kind = kind
-        block = [Paragraph(f"Q{i}. {escape(str(item.get('question', '')))}", styles["QC_Question"])]
+        block = [Paragraph(f"Q{i}. {escape(pdf_safe(item.get('question', '')))}", styles["QC_Question"])]
         opts = item.get("options", [])
         if isinstance(opts, list):
-            block.extend(Paragraph(escape(str(opt)), styles["QC_Body"]) for opt in opts)
+            block.extend(Paragraph(escape(pdf_safe(opt)), styles["QC_Body"]) for opt in opts)
         if include_answers:
             block.append(Paragraph(f"<b>Answer:</b> {escape(str(item.get('correct_answer', 'Not provided')))}", styles["QC_Body"]))
         story.append(KeepTogether(block))
